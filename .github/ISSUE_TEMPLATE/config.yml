@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Built something on zeldaFlow?
+    url: https://github.com/zeldaLabs/zeldaFlow/discussions
+    about: Show it off in Discussions — that's what it's there for.
+  - name: Question, or not sure it's a bug
+    url: https://github.com/zeldaLabs/zeldaFlow/discussions
+    about: Ask in Discussions. Issues are for confirmed bugs and concrete requests.
+  - name: Security vulnerability
+    url: https://github.com/zeldaLabs/zeldaFlow/security/advisories/new
+    about: Report privately. Please do not open a public issue.

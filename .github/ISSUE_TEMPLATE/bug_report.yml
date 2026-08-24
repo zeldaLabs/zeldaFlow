@@ -1,0 +1,92 @@
+name: Bug report
+description: Something in zeldaFlow doesn't work the way it says it does
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Two things before you start:
+
+        **Security vulnerabilities do not go here.** Use the Security tab →
+        *Report a vulnerability*, or see [SECURITY.md](../blob/main/SECURITY.md).
+
+        **Logs record what you dictated.** Read anything you paste below before
+        you paste it.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: And what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Hold Fn and say "..."
+        2. Release
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part?
+      options:
+        - Dictation (hold/double-tap Fn)
+        - Command mode (triple-tap Fn)
+        - Meeting notes
+        - Agent mode (Claude Code bridge)
+        - The pill / window placement
+        - Build, setup, or models
+        - Permissions and signing
+        - Something else
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "15.4"
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Mac model
+      description: zeldaFlow is Apple Silicon only.
+      placeholder: "MacBook Pro M4 Pro, 24 GB"
+    validations:
+      required: true
+  - type: textarea
+    id: evals
+    attributes:
+      label: Eval output
+      description: |
+        Run the harness closest to your problem and paste the tail. If it
+        passes, that's useful too — it narrows things down a lot.
+      placeholder: |
+        $ ./build/zeldaFlow.app/Contents/MacOS/zeldaFlow --evalcommands
+        ...
+      render: shell
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: |
+        From `~/Library/Application Support/zeldaFlow/zeldaflow.log`.
+        See [docs/OBSERVABILITY.md](../blob/main/docs/OBSERVABILITY.md).
+        **Check it for anything private first — it records your dictation.**
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I built with `scripts/build-app.sh` (not `swift build`)
+          required: true
+        - label: I ran `scripts/make-cert.sh` before my first build
+          required: true
+        - label: I removed anything private from the logs above
+          required: true

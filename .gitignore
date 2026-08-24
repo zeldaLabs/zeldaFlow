@@ -1,0 +1,41 @@
+.build/
+build/
+.DS_Store
+*.p12
+*.key
+*.crt
+dev-cert/
+.claude/
+.swiftpm/
+xcuserdata/
+*.log
+
+# The iPhone app lives on the `ios` branch, not here. Checking it out leaves
+# its untracked heavyweights (the 574 MB eval model, xcframework dSYMs) on
+# disk so switching back doesn't re-download them — and this rule keeps a
+# stray `git add -A` from sweeping the port onto main again.
+ios/
+
+# The Windows port lives on the `windows-port` branch. This rule is why it
+# can't come back: a stray `git add -A` on main once swept 277 MB of its
+# build output — DLLs, obj/, and absolute home paths — into the history.
+windows/
+
+# Xcode / editors
+DerivedData/
+*.xcuserstate
+.vscode/
+.idea/
+
+# Credentials and key material (siblings of the *.p12/*.key/*.crt above)
+.env
+.env.*
+*.pem
+*.cer
+*.p8
+*.mobileprovision
+
+# Models live in ~/Library/Application Support/zeldaFlow/models, never here.
+# A stray copy is gigabytes and would sail straight into a commit.
+*.gguf
+*.mlmodelc/

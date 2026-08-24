@@ -1,0 +1,42 @@
+name: Feature request
+description: Suggest something zeldaFlow should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Worth knowing before you write this up:
+
+        - **Nothing that puts dictation on the network will be built.** That
+          constraint is the product, not a default.
+        - There is no roadmap, and no promise that a good idea gets built.
+        - If you'd rather just build it yourself, you don't need our
+          permission — fork it. See
+          [docs/EXTENDING.md](../blob/main/docs/EXTENDING.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The problem, not the solution. What does the workflow look like today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What should happen instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: locality
+    attributes:
+      label: Can this work fully on-device?
+      options:
+        - "Yes — no network needed"
+        - "No — it would need the network"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried, or what else would work?

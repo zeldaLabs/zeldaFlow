@@ -1,0 +1,16 @@
+# Every change needs review from a zeldaFlow maintainer.
+# Ordered by specificity: the last matching rule wins.
+
+*                       @Manukrish2504 @inadver404
+
+# Load-bearing surfaces — the network boundary, the privilege surface, and
+# the licensing story. Same owners today; listed separately so the intent
+# survives the day this file grows more names.
+/LICENSE                @Manukrish2504 @inadver404
+/NOTICE                 @Manukrish2504 @inadver404
+/TRADEMARK.md           @Manukrish2504 @inadver404
+/THIRD-PARTY-LICENSES.md @Manukrish2504 @inadver404
+/SECURITY.md            @Manukrish2504 @inadver404
+/Vendor/                @Manukrish2504 @inadver404
+/scripts/               @Manukrish2504 @inadver404
+/.github/               @Manukrish2504 @inadver404

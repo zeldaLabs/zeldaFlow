@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Read-only by default; nothing here needs to write to the repo.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-eval:
+    name: Build + headless evals
+    # Apple Silicon runner: both setup.sh and build-app.sh hard-fail on Intel.
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          xcode-select -p
+          swiftc --version
+          echo "arm64: $(sysctl -n hw.optional.arm64)"
+
+      # No models, no keychain, no TCC grants on a runner. build-app.sh falls
+      # back to ad-hoc signing with a warning when "zeldaFlow Dev" is absent,
+      # which is exactly right here — CI proves it compiles and that the pure
+      # logic holds. Signing and permissions are verified on a real Mac
+      # (docs/UAT.md), because TCC grants are keyed to the signature.
+      - name: Build
+        run: scripts/build-app.sh release
+
+      # The four harnesses that need no microphone, no models, no display and
+      # no permissions. Each exits non-zero on failure. The rest of the twelve
+      # (--selftest, --evalpill, --evalaudio, --evalui, --evalactions,
+      # --evalfiles) need hardware or grants — see docs/TESTING.md.
+      - name: Command grammar, gates, anti-hallucination (40 pins)
+        run: ./build/zeldaFlow.app/Contents/MacOS/zeldaFlow --evalcommands
+
+      - name: Hotkey latency and gestures
+        run: ./build/zeldaFlow.app/Contents/MacOS/zeldaFlow --evalhotkey
+
+      - name: Task loop safety, termination, pruning
+        run: ./build/zeldaFlow.app/Contents/MacOS/zeldaFlow --evaltask
+
+      # Live tiers skip cleanly without models; the pure tiers still run.
+      - name: Meeting detection, chunking, notes, diarizer
+        run: ./build/zeldaFlow.app/Contents/MacOS/zeldaFlow --evalmeeting
+
+  licenses:
+    name: License files intact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Apache-2.0 and BSD-2 both require these texts to travel with the code.
+      # Losing one in a refactor is silent and legally material, so it's a gate.
+      - name: Required license texts are present
+        run: |
+          set -e
+          for f in LICENSE NOTICE TRADEMARK.md THIRD-PARTY-LICENSES.md \
+                   Vendor/README.md \
+                   Vendor/FluidAudio/LICENSE \
+                   Vendor/FluidAudio/VENDORED.md \
+                   Vendor/FluidAudio/ThirdPartyLicenses/fastcluster-LICENSE.md \
+                   Vendor/FluidAudio/ThirdPartyLicenses/vbx-LICENSE.md; do
+            [ -s "$f" ] || { echo "MISSING or empty: $f"; exit 1; }
+            echo "ok  $f"
+          done
+          grep -q "Copyright 2026 zeldaLabs FZ LLC" LICENSE \
+            || { echo "LICENSE appendix is not filled in"; exit 1; }
+          echo "ok  LICENSE copyright line"
