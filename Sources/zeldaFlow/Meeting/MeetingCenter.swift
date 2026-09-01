@@ -309,6 +309,18 @@ import Combine
                 }
             }
 
+            // Infer participant names AFTER polish (both passes should read
+            // the same corrected words) and BEFORE notes (the roster must
+            // exist when the owner grammar is built). Fail-closed: nil
+            // changes nothing and the notes still run (ADR 38).
+            if AppSettings.shared.meetingIdentifySpeakers, let cleanup = self.cleanup,
+               noteSegments.contains(where: { $0.source == .them }) {
+                if self.meetingGeneration == generation {
+                    self.uiPhase = .processing(step: "Identifying participants…")
+                }
+                await self.inferSpeakerNames(id: id, segments: noteSegments, cleanup: cleanup)
+            }
+
             if AppSettings.shared.meetingAutoNotes, let cleanup = self.cleanup {
                 if self.meetingGeneration == generation {
                     self.uiPhase = .processing(step: "Writing notes…")
@@ -339,6 +351,39 @@ import Combine
 
     // MARK: - Notes
 
+    /// One evidence-gated Gemma call proposing {speaker → name} from the
+    /// transcript, stored in meta.inferredSpeakerNames — never in
+    /// speakerNames, so a user rename always wins (ADR 38).
+    private func inferSpeakerNames(id: UUID, segments: [MeetingSegment],
+                                   cleanup: CleanupService) async {
+        let meta = await Task.detached { self.store.loadMeta(id) }.value
+        // Inference runs on the PRE-inference roster (user renames apply,
+        // inferred slots still show their defaults for the schema enum).
+        let roster = MeetingRoster(segments: segments,
+                                   userNames: meta?.speakerNamesByCluster ?? [:])
+        guard let inferred = await SpeakerNameInferrer.infer(
+                segments: segments, roster: roster, cleanup: cleanup,
+                dictationActive: { [dictationBusy] in dictationBusy.value })
+        else { return }
+        store.updateMeta(id) { $0.inferredSpeakerNames = inferred }
+        Log.info("MeetingCenter: inferred \(inferred.count) speaker name(s) for \(id)")
+    }
+
+    /// Re-render notes.md from notes.json under the CURRENT roster — the
+    /// rename-propagation path: no model, milliseconds (ADR 38). No-op for
+    /// pre-ADR-38 meetings (no notes.json — their notes carry no names).
+    /// Returns once the write is enqueued on the store's serial queue, so a
+    /// caller's subsequent loadNotes reads the new render.
+    func rerenderNotes(_ id: UUID) async {
+        let loaded = await Task.detached {
+            (self.store.loadNotesDocument(id), self.store.loadMeta(id),
+             self.store.loadSegments(id))
+        }.value
+        guard let document = loaded.0 else { return }
+        let labels = loaded.1?.roster(for: loaded.2).labelsByKey
+        store.writeNotes(id, markdown: document.render(labels: labels))
+    }
+
     private func generateNotes(id: UUID, segments: [MeetingSegment],
                                cleanup: CleanupService) async {
         // The progress closure hops to the main actor through a Task, so its
@@ -351,8 +396,10 @@ import Combine
         activeNotesRuns.insert(id)
         defer { activeNotesRuns.remove(id) }
         setNoteState(id, .generating(completed: 0, total: max(segments.count / 8, 3)))
+        let meta = await Task.detached { self.store.loadMeta(id) }.value
+        let roster = meta?.roster(for: segments) ?? MeetingRoster(segments: segments)
         let result = await notesGenerator.generate(
-            segments: segments, cleanup: cleanup,
+            segments: segments, roster: roster, cleanup: cleanup,
             dictationActive: { [dictationBusy] in dictationBusy.value },
             progress: { [weak self] completed, total in
                 Task { @MainActor in
@@ -366,6 +413,10 @@ import Combine
             setNoteState(id, .failed("Notes failed — transcript saved, tap Retry"))
             return
         }
+        // Document before markdown: a crash between the two leaves notes.md
+        // one render behind its source, which the next render fixes — the
+        // reverse order could leave a notes.md no document can reproduce.
+        store.writeNotesDocument(id, result.document)
         store.writeNotes(id, markdown: result.markdown)
         if var record = store.records.first(where: { $0.id == id }) {
             if record.title.isEmpty { record.title = result.title }
@@ -383,12 +434,22 @@ import Combine
     }
 
     /// Manual regenerate (stale notes, failed runs, changed transcripts).
+    /// Runs name inference first for meetings that predate it — a regenerate
+    /// is how an old meeting's notes pick up participant names (ADR 38).
     func regenerateNotes(_ id: UUID) {
         guard let cleanup else { return }
         Task { [weak self] in
             guard let self else { return }
             let segments = await Task.detached { self.store.loadSegments(id) }.value
             guard !segments.isEmpty else { return }
+            let alreadyInferred = await Task.detached {
+                self.store.loadMeta(id)?.inferredSpeakerNames
+            }.value
+            if AppSettings.shared.meetingIdentifySpeakers,
+               segments.contains(where: { $0.source == .them }),
+               alreadyInferred == nil {
+                await self.inferSpeakerNames(id: id, segments: segments, cleanup: cleanup)
+            }
             await self.generateNotes(id: id, segments: segments, cleanup: cleanup)
         }
     }

@@ -96,12 +96,24 @@ enum TranscriptLine: Codable, Equatable {
 }
 
 extension Array where Element == MeetingSegment {
-    /// "You:/Them:" lines in spoken order — the LLM-facing and export shape
+    /// "You:/Them:" lines in spoken order — the HASH and legacy-export shape
     /// (the port of OpenWhispr's buildOrderedTranscriptText: holdback releases
     /// commit out of spoken order, so sort by start, not by insertion).
+    /// NEVER speaker-labeled: transcriptHash() is the notes-staleness anchor
+    /// and must stay byte-stable across diarization and renames (ADR 31).
+    /// The notes pipeline reads speakerTranscriptText(roster:) instead.
     func orderedTranscriptText() -> String {
         sorted { $0.start < $1.start }
             .map { "\($0.source == .you ? "You" : "Them"): \($0.text)" }
+            .joined(separator: "\n")
+    }
+
+    /// The LLM-facing shape since ADR 38: same ordering, but each line
+    /// carries the segment's roster label ("You:", "Priya:", "Speaker 2:").
+    /// Kept apart from orderedTranscriptText() so the hash never moves.
+    func speakerTranscriptText(roster: MeetingRoster) -> String {
+        sorted { $0.start < $1.start }
+            .map { "\(roster.label(for: $0)): \($0.text)" }
             .joined(separator: "\n")
     }
 
@@ -110,6 +122,150 @@ extension Array where Element == MeetingSegment {
     func transcriptHash() -> String {
         let digest = SHA256.hash(data: Data(orderedTranscriptText().utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+// MARK: - Roster (ADR 38)
+
+/// The per-meeting mapping from stable speaker keys to display labels, built
+/// once before notes generation and rebuilt on every render. Keys are
+/// strings derived from the rename keys — "you" for the mic, "s0"/"s1"… for
+/// diarized clusters, "s-1" for the undiarized far side — so they survive
+/// JSON round-trips and never collide. A label resolves as
+/// user rename ?? inferred name ?? default, and the user always wins.
+struct MeetingRoster: Equatable {
+    struct Entry: Equatable {
+        let key: String
+        let label: String
+    }
+
+    /// "you" first, then far-side keys in first-speech order.
+    private(set) var entries: [Entry] = []
+    private var byKey: [String: String] = [:]
+
+    static func key(forRenameKey renameKey: Int) -> String { "s\(renameKey)" }
+
+    /// `userNames` is meta.speakerNames (Int cluster keys); `inferred` is
+    /// meta.inferredSpeakerNames (roster string keys). Duplicate labels
+    /// de-collide by falling back to the default — a second speaker inferred
+    /// as "Priya" when one already is stays "Speaker N", keeping
+    /// key(forLabel:) bijective for the owner grammar.
+    init(segments: [MeetingSegment],
+         userNames: [Int: String] = [:],
+         inferred: [String: String] = [:]) {
+        var used: Set<String> = ["you"]
+        entries.append(Entry(key: "you", label: "You"))
+        byKey["you"] = "You"
+        for segment in segments.sorted(by: { $0.start < $1.start }) {
+            guard let renameKey = segment.renameKey else { continue }
+            let key = Self.key(forRenameKey: renameKey)
+            guard byKey[key] == nil else { continue }
+            let fallback = renameKey == MeetingSegment.unlabeledSpeakerKey
+                ? "Them" : "Speaker \(renameKey + 1)"
+            var label = userNames[renameKey] ?? inferred[key] ?? fallback
+            if used.contains(label.lowercased()) { label = fallback }
+            used.insert(label.lowercased())
+            entries.append(Entry(key: key, label: label))
+            byKey[key] = label
+        }
+    }
+
+    func label(forKey key: String) -> String { byKey[key] ?? key }
+
+    func label(for segment: MeetingSegment) -> String {
+        guard let renameKey = segment.renameKey else { return "You" }
+        return byKey[Self.key(forRenameKey: renameKey)] ?? "Them"
+    }
+
+    /// Every label the owner grammar may emit (the roster, "Unclear" is
+    /// appended by the schema builder).
+    var ownerLabels: [String] { entries.map(\.label) }
+
+    /// Labels of everyone but the user — the free-text rename targets.
+    var farSideEntries: [Entry] { entries.filter { $0.key != "you" } }
+
+    func key(forLabel label: String) -> String? {
+        entries.first { $0.label == label }?.key
+    }
+
+    /// key → label, the shape NotesDocument persists.
+    var labelsByKey: [String: String] { byKey }
+}
+
+// MARK: - Structured notes document (ADR 38)
+
+/// The merged, structured result of a notes run — notes.json, written next
+/// to notes.md. notes.md is a RENDER of this document: renaming a speaker
+/// re-renders in milliseconds from here, no LLM involved. Action owners are
+/// stored as stable roster keys ("you"/"s0"/"unclear"), and `roster` records
+/// the labels the model actually saw, so a later render can rewrite them in
+/// free text too.
+struct NotesDocument: Codable, Equatable {
+    struct Action: Codable, Equatable {
+        var owner: String   // roster key, or "unclear"
+        var text: String
+    }
+    var version: Int = 1
+    var summary: String
+    var discussion: [String]
+    var decisions: [String]
+    var actions: [Action]
+    var followups: [String]
+    /// Roster at generation time: key → the label the LLM saw.
+    var roster: [String: String]
+
+    /// Markdown render under `labels` (key → current label; nil entries fall
+    /// back to the generation-time roster). Two mechanisms: action owners
+    /// resolve by KEY (exact), and free-text bullets get a word-boundary
+    /// rewrite of each far-side generation label to its current label,
+    /// longest-first. "You" is never free-text rewritten — too common a word
+    /// to touch safely; its attribution rides only on the owner keys.
+    func render(labels: [String: String]? = nil) -> String {
+        let current = labels ?? roster
+        func label(_ key: String) -> String { current[key] ?? roster[key] ?? key }
+        let renames = roster
+            .filter { $0.key != "you" }
+            .compactMap { entry -> (String, String)? in
+                let new = label(entry.key)
+                return new == entry.value ? nil : (entry.value, new)
+            }
+            .sorted { $0.0.count > $1.0.count }
+        func resolve(_ text: String) -> String {
+            var out = text
+            for (old, new) in renames {
+                let pattern = "\\b" + NSRegularExpression.escapedPattern(for: old) + "\\b"
+                if let re = try? NSRegularExpression(pattern: pattern) {
+                    out = re.stringByReplacingMatches(
+                        in: out, range: NSRange(out.startIndex..., in: out),
+                        withTemplate: NSRegularExpression.escapedTemplate(for: new))
+                }
+            }
+            return out
+        }
+
+        var parts: [String] = []
+        let opening = resolve(summary.trimmingCharacters(in: .whitespacesAndNewlines))
+        if !opening.isEmpty { parts.append(opening) }
+        if !discussion.isEmpty {
+            parts.append("## Key Discussion Points\n"
+                + discussion.map { "- \(resolve($0))" }.joined(separator: "\n"))
+        }
+        if !decisions.isEmpty {
+            parts.append("## Decisions Made\n"
+                + decisions.map { "- \(resolve($0))" }.joined(separator: "\n"))
+        }
+        if !actions.isEmpty {
+            parts.append("## Action Items\n" + actions.map { item in
+                // No prefix for "unclear" — it would read as a person's name.
+                let prefix = item.owner == "unclear" ? "" : "**\(label(item.owner))**: "
+                return "- [ ] \(prefix)\(resolve(item.text))"
+            }.joined(separator: "\n"))
+        }
+        if !followups.isEmpty {
+            parts.append("## Follow-ups\n"
+                + followups.map { "- \(resolve($0))" }.joined(separator: "\n"))
+        }
+        return parts.joined(separator: "\n\n")
     }
 }
 
@@ -178,6 +334,10 @@ struct MeetingMeta: Codable, Equatable {
     /// transcript file or its hash.
     var speakerNames: [String: String]?
     var diarizedAt: Date?
+    /// Names inferred from the transcript by the local model (ADR 38), keyed
+    /// by roster key ("s0", "s-1"). Kept APART from speakerNames so a user
+    /// rename always wins and re-running inference can never clobber one.
+    var inferredSpeakerNames: [String: String]?
     /// Thumbs on the two artefacts the user actually reads (ADR 35).
     /// Optional: absent means "never asked/answered", which is what the
     /// in-page prompt keys off.
@@ -185,6 +345,26 @@ struct MeetingMeta: Codable, Equatable {
     var transcriptRatedAt: Date?
     var notesRating: MeetingRating?
     var notesRatedAt: Date?
+}
+
+extension MeetingMeta {
+    /// meta.speakerNames keeps String keys (JSON friendliness); rosters and
+    /// the UI want cluster indices.
+    var speakerNamesByCluster: [Int: String] {
+        var out: [Int: String] = [:]
+        for (key, value) in speakerNames ?? [:] {
+            if let index = Int(key) { out[index] = value }
+        }
+        return out
+    }
+
+    /// The roster this meta implies for `segments` — user renames over
+    /// inferred names over defaults (ADR 38).
+    func roster(for segments: [MeetingSegment]) -> MeetingRoster {
+        MeetingRoster(segments: segments,
+                      userNames: speakerNamesByCluster,
+                      inferred: inferredSpeakerNames ?? [:])
+    }
 }
 
 // MARK: - Lifecycle vocabulary

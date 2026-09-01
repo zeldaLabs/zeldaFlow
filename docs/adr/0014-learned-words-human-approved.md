@@ -1,6 +1,6 @@
 # 14. Learned-words dictionary: auto-suggest, human-approve, never interrupt
 
-Status: Accepted
+Status: Accepted, amended by [ADR 0037](0037-correction-detection-learns-the-dictionary.md)
 Date: 2026-07-19
 
 ## Context

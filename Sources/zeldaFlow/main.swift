@@ -40,6 +40,9 @@ if args.count >= 2, args[1] == "--evaltask" {
 if args.count >= 2, args[1] == "--evalfiles" {
     exit(FileEvals.run())
 }
+if args.count >= 2, args[1] == "--evaldictionary" {
+    exit(DictionaryEvals.run())
+}
 if args.count >= 2, args[1] == "--evalactions" {
     exit(ActionEvals.run())
 }

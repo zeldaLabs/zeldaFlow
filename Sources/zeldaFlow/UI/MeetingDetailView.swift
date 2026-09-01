@@ -28,6 +28,10 @@ import SwiftUI
     @Published var editingNotes = false
     /// Per-meeting speaker renames, cluster index → name (ADR 31).
     @Published var speakerNames: [Int: String] = [:]
+    /// Names inferred from the transcript (ADR 38) — display fallback only;
+    /// a user rename in `speakerNames` always wins, and only `speakerNames`
+    /// is ever written back to meta.
+    @Published var inferredNames: [Int: String] = [:]
     /// Thumbs on each artefact (ADR 35); nil = not rated yet, which is what
     /// shows the in-page ask.
     @Published var transcriptRating: MeetingRating?
@@ -132,6 +136,7 @@ import SwiftUI
             self.notesHash = loaded.1?.notesHash
             self.notesEditedAt = loaded.1?.notesEditedAt
             self.speakerNames = Self.parseSpeakerNames(loaded.1?.speakerNames)
+            self.inferredNames = Self.parseInferredNames(loaded.1?.inferredSpeakerNames)
             self.transcriptRating = loaded.1?.transcriptRating
             self.notesRating = loaded.1?.notesRating
             self.refreshStaleness()
@@ -172,6 +177,21 @@ import SwiftUI
         return out
     }
 
+    /// meta.inferredSpeakerNames is keyed by roster key ("s0", "s-1").
+    private static func parseInferredNames(_ raw: [String: String]?) -> [Int: String] {
+        var out: [Int: String] = [:]
+        for (key, value) in raw ?? [:] {
+            if key.hasPrefix("s"), let index = Int(key.dropFirst()) { out[index] = value }
+        }
+        return out
+    }
+
+    /// What the transcript, exports, and menus actually show: user renames
+    /// over inferred names (ADR 38).
+    var displayNames: [Int: String] {
+        inferredNames.merging(speakerNames) { _, user in user }
+    }
+
     // MARK: Speaker renaming (ADR 31)
 
     /// Distinct far-side speakers in this transcript, in first-heard order.
@@ -186,7 +206,7 @@ import SwiftUI
     }
 
     func speakerMenuTitle(_ key: Int) -> String {
-        if let name = speakerNames[key] { return name }
+        if let name = displayNames[key] { return name }
         return key == MeetingSegment.unlabeledSpeakerKey ? "Them" : "Speaker \(key + 1)"
     }
 
@@ -198,12 +218,13 @@ import SwiftUI
     func promptRenameSpeaker(_ cluster: Int) {
         let fallback = cluster == MeetingSegment.unlabeledSpeakerKey
             ? "Them" : "Speaker \(cluster + 1)"
+        let previousLabel = displayNames[cluster] ?? fallback
         let alert = NSAlert()
         alert.messageText = "Name this speaker"
-        alert.informativeText = "Shown in place of “\(fallback)” in this meeting's transcript and exports."
+        alert.informativeText = "Shown in place of “\(previousLabel)” in this meeting's transcript, notes, and exports."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
         field.placeholderString = fallback
-        field.stringValue = speakerNames[cluster] ?? ""
+        field.stringValue = displayNames[cluster] ?? ""
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         alert.addButton(withTitle: "Rename")
@@ -221,6 +242,32 @@ import SwiftUI
                 ? nil
                 : Dictionary(uniqueKeysWithValues: snapshot.map { (String($0.key), $0.value) })
         }
+        propagateRenameIntoNotes(cluster: cluster, previousLabel: previousLabel)
+    }
+
+    /// Renames reach the notes too (ADR 38). Unedited notes re-render from
+    /// notes.json under the new roster — deterministic, no model, no drift.
+    /// Hand-edited notes are never clobbered: they get a best-effort
+    /// word-boundary text replacement of the one label that changed ("You"
+    /// is never a rename target here — only far-side clusters rename).
+    private func propagateRenameIntoNotes(cluster: Int, previousLabel: String) {
+        guard notes != nil, !editingNotes else { return }
+        if notesEditedAt == nil {
+            Task { [weak self] in
+                guard let self else { return }
+                await MeetingCenter.shared.rerenderNotes(self.recordID)
+                self.loadNotesAndMeta()
+            }
+            return
+        }
+        let newLabel = displayNames[cluster]
+            ?? (cluster == MeetingSegment.unlabeledSpeakerKey ? "Them" : "Speaker \(cluster + 1)")
+        guard newLabel != previousLabel, previousLabel != "You",
+              let current = notes, !current.isEmpty else { return }
+        let updated = Replacements.apply([previousLabel: newLabel], to: current)
+        guard updated != current else { return }
+        notes = updated
+        MeetingStore.shared.writeNotes(recordID, markdown: updated)
     }
 
     /// meta.notesHash is the transcript hash at generation time; a mismatch
@@ -378,10 +425,10 @@ import SwiftUI
         let content: String
         switch ext {
         case "md":  content = MeetingExporter.markdown(record: rec, segments: segments,
-                                                       names: speakerNames)
-        case "srt": content = MeetingExporter.srt(segments: segments, names: speakerNames)
+                                                       names: displayNames)
+        case "srt": content = MeetingExporter.srt(segments: segments, names: displayNames)
         default:    content = MeetingExporter.txt(record: rec, segments: segments,
-                                                  names: speakerNames)
+                                                  names: displayNames)
         }
         save(content, name: fileName(rec, ext: ext))
     }
@@ -738,7 +785,7 @@ struct MeetingDetailView: View {
                 // The transcript pads its bubbles 16 pt internally; 12 here
                 // lands them on the page's 28 pt gutter.
                 MeetingTranscriptView(segments: model.segments, isLive: model.isLive,
-                                      speakerNames: model.speakerNames,
+                                      speakerNames: model.displayNames,
                                       onRenameSpeaker: { model.promptRenameSpeaker($0) })
                     .padding(.horizontal, 12)
             }

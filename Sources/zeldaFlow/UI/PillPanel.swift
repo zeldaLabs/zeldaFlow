@@ -231,6 +231,11 @@ final class PillController {
             // notice, but the panel accepts the tap that expands it.
             return PillLayout(width: 560, height: 120, clickable: true,
                               key: false, visible: true, placement: .keep)
+        case .learnPrompt:
+            // Same contract as .answer — clickable, never key, auto-fades.
+            // The tap approves the correction instead of opening chat.
+            return PillLayout(width: 560, height: 120, clickable: true,
+                              key: false, visible: true, placement: .keep)
         case .chat:
             // The pill grown into the chat note. Takes key like the type bar
             // so the composer gets the keyboard without activating the app.

@@ -57,13 +57,16 @@ final class MeetingNotesGenerator: ObservableObject {
     struct Result {
         let markdown: String
         let title: String
+        /// The structured document notes.md was rendered from (ADR 38) —
+        /// persisted as notes.json so renames re-render without the model.
+        let document: NotesDocument
     }
 
     // MARK: - Shapes the model is forced into
 
-    /// One action item. `owner` is grammar-constrained to "You|Them|Unclear"
-    /// — the tokens simply cannot form anything else, so the renderer never
-    /// meets a fourth speaker.
+    /// One action item. `owner` is grammar-constrained to the meeting's
+    /// roster labels plus "Unclear" (ADR 38) — the tokens simply cannot form
+    /// anything else, so the renderer never meets an uninvited speaker.
     struct ActionItem: Codable, Equatable {
         let owner: String
         let text: String
@@ -101,49 +104,62 @@ final class MeetingNotesGenerator: ObservableObject {
     /// only the question invents the answer's owner.
     nonisolated static let turnBreakThreshold = 2_850
 
-    // MARK: - Prompts (static constants, NOTHING interpolated)
+    // MARK: - Prompts (per-meeting constants, NOTHING per-chunk interpolated)
 
     /// CleanupService's KV-cache rule: cache_prompt only pays when the system
     /// prompt is byte-identical each call (measured 370/375 tokens cached on
-    /// the planner) — so no "part N of M", no chunk counts, nothing varying.
-    static let mapSystemPrompt = """
-    You extract structured facts from one portion of a longer meeting transcript. "You:" marks the user's speech and "Them:" marks the other participant(s). Other portions are processed separately, so extract only what THIS text supports.
+    /// the planner) — so no "part N of M", no chunk counts, nothing varying
+    /// per CHUNK. The roster line (ADR 38) is per-MEETING and byte-identical
+    /// across a run's dozen-plus map calls, and it sits at the END of the
+    /// prompt so the static prefix still caches across meetings.
+    nonisolated static func mapSystemPrompt(roster: MeetingRoster) -> String {
+        """
+        You extract structured facts from one portion of a longer meeting transcript. Each line begins with a speaker label and a colon. "You" is the user; the other labels are the other participants. Other portions are processed separately, so extract only what THIS text supports.
 
-    Reply with JSON only, matching the schema you are given.
+        Reply with JSON only, matching the schema you are given.
 
-    CONTENT RULES:
-    - "summary": one sentence stating what this portion of the meeting was about.
-    - "discussion": the substantive points discussed. Where speakers return to the same topic across multiple turns, consolidate into one coherent point rather than listing every utterance.
-    - "decisions": only things explicitly agreed, approved, or settled in this portion.
-    - "actions": concrete commitments to do something. Set "owner" to "You" when the user committed, "Them" when the other participant(s) did, "Unclear" otherwise. Preserve specific commitments verbatim when the wording carries meaning.
-    - "followups": open questions, deferred topics, or things to revisit later.
-    - Remove filler, small talk, false starts, and repeated or redundant content.
-    - Do NOT list or guess participant names or roles.
-    - Leave any array empty when this portion has nothing for it. Keep each item to one concise sentence.
-    """
+        CONTENT RULES:
+        - "summary": one sentence stating what this portion of the meeting was about.
+        - "discussion": the substantive points discussed, each written as "**Topic** — point" with a 1-3 word topic. Where speakers return to the same topic across multiple turns, consolidate into one coherent point rather than listing every utterance.
+        - "decisions": only things explicitly agreed, approved, or settled in this portion. Say who agreed when the text shows it.
+        - "actions": concrete commitments to do something. Set "owner" to the label of the speaker who committed, or "Unclear". Include the due date in the text when one was stated. Preserve specific commitments verbatim when the wording carries meaning.
+        - "followups": open questions, deferred topics, or things to revisit later.
+        - Remove filler, small talk, false starts, and repeated or redundant content.
+        - Refer to people ONLY by these labels: \(rosterLine(roster)). Never introduce any other name or role.
+        - Leave any array empty when this portion has nothing for it. Keep each item to one concise sentence.
+        """
+    }
 
     static let summarySystemPrompt = """
-    You write the opening of meeting notes. You are given one-sentence summaries of consecutive portions of a single meeting, in order. Reply with a concise 1-2 sentence summary of what the whole meeting was about — plain text only, no preamble, no headings, no quotes.
+    You write the opening of meeting notes. You are given one-sentence summaries of consecutive portions of a single meeting, in order. Reply with a concise 1-2 sentence summary of what the whole meeting was about — plain text only, no preamble, no headings, no quotes. Refer to people only by the labels that appear in the input; never introduce other names.
     """
 
-    static let polishSystemPrompt = """
-    You tighten meeting notes. You are given draft bullet lists for the sections of one meeting's notes. Merge bullets that describe the same point, keep concrete details and verbatim commitments, and bias toward brevity. Do not invent content. Do not guess participant names or roles. Reply with JSON only, matching the schema you are given.
-    """
+    nonisolated static func polishSystemPrompt(roster: MeetingRoster) -> String {
+        """
+        You tighten meeting notes. You are given draft bullet lists for the sections of one meeting's notes. Merge bullets that describe the same point, keep concrete details, due dates, and verbatim commitments, and bias toward brevity. Do not invent content. Refer to people ONLY by these labels: \(rosterLine(roster)). Reply with JSON only, matching the schema you are given.
+        """
+    }
+
+    private nonisolated static func rosterLine(_ roster: MeetingRoster) -> String {
+        roster.ownerLabels.map { "\"\($0)\"" }.joined(separator: ", ")
+    }
 
     /// ported: generateTitle.ts TITLE_SYSTEM_PROMPT, verbatim.
     static let titleSystemPrompt = "Generate a concise 3-8 word title for these notes. Return ONLY the title text, nothing else — no quotes, no prefix, no explanation."
 
     // MARK: - Schemas
 
-    static let mapSchema = notesSchema(includeSummary: true)
-    static let polishSchema = notesSchema(includeSummary: false)
-
-    nonisolated static func notesSchema(includeSummary: Bool) -> CleanupService.JSONValue {
+    /// The owner enum is the meeting's actual roster plus "Unclear" (ADR 38)
+    /// — a dynamic grammar, but still a grammar: a speaker who wasn't in the
+    /// meeting is unrepresentable, exactly as "a fourth speaker" used to be.
+    nonisolated static func notesSchema(includeSummary: Bool,
+                                        ownerLabels: [String]) -> CleanupService.JSONValue {
         typealias J = CleanupService.JSONValue
         let stringArray: J = .object([
             "type": .string("array"),
             "items": .object(["type": .string("string")]),
         ])
+        let ownerEnum: [J] = (ownerLabels + ["Unclear"]).map { .string($0) }
         var props: [String: J] = [
             "discussion": stringArray,
             "decisions": stringArray,
@@ -154,7 +170,7 @@ final class MeetingNotesGenerator: ObservableObject {
                     "properties": .object([
                         "owner": .object([
                             "type": .string("string"),
-                            "enum": .array([.string("You"), .string("Them"), .string("Unclear")]),
+                            "enum": .array(ownerEnum),
                         ]),
                         "text": .object(["type": .string("string")]),
                     ]),
@@ -181,28 +197,32 @@ final class MeetingNotesGenerator: ObservableObject {
     // MARK: - Chunker (pure; internal for the eval suite)
 
     /// Greedy fill by chars, never splitting a segment; past 75% of the
-    /// budget a speaker turn (source change) is taken as the break point.
-    /// Sorted by `start`, not insertion order — holdback releases commit out
-    /// of spoken order (same rule as orderedTranscriptText, the port of
-    /// OpenWhispr's buildOrderedTranscriptText).
-    nonisolated static func chunk(_ segments: [MeetingSegment]) -> [String] {
+    /// budget a speaker turn is taken as the break point — keyed on the
+    /// rename key since ADR 38, so a Speaker 1 → Speaker 2 handoff breaks a
+    /// chunk exactly like a You → Them one. Sorted by `start`, not insertion
+    /// order — holdback releases commit out of spoken order (same rule as
+    /// orderedTranscriptText, the port of OpenWhispr's
+    /// buildOrderedTranscriptText). Lines carry roster labels; chunks
+    /// reassemble byte-for-byte to speakerTranscriptText(roster:).
+    nonisolated static func chunk(_ segments: [MeetingSegment],
+                                  roster: MeetingRoster) -> [String] {
         let ordered = segments
             .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .sorted { $0.start < $1.start }
         var chunks: [String] = []
         var current = ""
-        var lastSource: MeetingSegment.Source?
+        var lastTurn: Int??   // nil = no previous segment; .some(nil) = mic
         for seg in ordered {
-            let line = "\(seg.source == .you ? "You" : "Them"): \(seg.text)"
+            let line = "\(roster.label(for: seg)): \(seg.text)"
             let addition = current.isEmpty ? line.count : line.count + 1
             let wouldOverflow = current.count + addition > chunkCharBudget
-            let turnBreak = current.count >= turnBreakThreshold && seg.source != lastSource
+            let turnBreak = current.count >= turnBreakThreshold && lastTurn != .some(seg.renameKey)
             if !current.isEmpty && (wouldOverflow || turnBreak) {
                 chunks.append(current)
                 current = ""
             }
             current += current.isEmpty ? line : "\n" + line
-            lastSource = seg.source
+            lastTurn = .some(seg.renameKey)
         }
         if !current.isEmpty { chunks.append(current) }
         return chunks
@@ -246,38 +266,26 @@ final class MeetingNotesGenerator: ObservableObject {
                         followups: dedup(outputs.flatMap { $0.followups }))
     }
 
-    // MARK: - Renderer (pure; internal for the eval suite)
+    // MARK: - Document builder (pure; internal for the eval suite)
 
-    /// Assembles OpenWhispr's exact note shape — summary paragraph, then the
-    /// four "##" sections with `- [ ]` action checkboxes, empty sections
-    /// omitted. Their FORMAT RULES are enforced by construction: a 2B model
-    /// cannot violate a format it never controls, so no preamble, no tables,
-    /// no invented attendee list — the model only ever supplied the bullets.
-    nonisolated static func render(summary: String, sections: Sections) -> String {
-        var parts: [String] = []
-        let opening = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !opening.isEmpty { parts.append(opening) }
-        if !sections.discussion.isEmpty {
-            parts.append("## Key Discussion Points\n"
-                + sections.discussion.map { "- \($0)" }.joined(separator: "\n"))
-        }
-        if !sections.decisions.isEmpty {
-            parts.append("## Decisions Made\n"
-                + sections.decisions.map { "- \($0)" }.joined(separator: "\n"))
-        }
-        if !sections.actions.isEmpty {
-            parts.append("## Action Items\n" + sections.actions.map { item in
-                // Owner prefix only when it says something; "Unclear" would
-                // read as a person's name in a checklist.
-                let prefix = (item.owner == "You" || item.owner == "Them") ? "\(item.owner): " : ""
-                return "- [ ] \(prefix)\(item.text)"
-            }.joined(separator: "\n"))
-        }
-        if !sections.followups.isEmpty {
-            parts.append("## Follow-ups\n"
-                + sections.followups.map { "- \($0)" }.joined(separator: "\n"))
-        }
-        return parts.joined(separator: "\n\n")
+    /// Sections (owners as roster LABELS, what the grammar emits) → the
+    /// persisted NotesDocument (owners as roster KEYS, stable across
+    /// renames). Rendering lives on NotesDocument itself so a rename can
+    /// re-render from notes.json without touching this class — the model's
+    /// FORMAT RULES are still enforced by construction: it only ever
+    /// supplied the bullets, never the shape (ADR 30, ADR 38).
+    nonisolated static func document(summary: String, sections: Sections,
+                                     roster: MeetingRoster) -> NotesDocument {
+        NotesDocument(
+            summary: summary.trimmingCharacters(in: .whitespacesAndNewlines),
+            discussion: sections.discussion,
+            decisions: sections.decisions,
+            actions: sections.actions.map {
+                NotesDocument.Action(owner: roster.key(forLabel: $0.owner) ?? "unclear",
+                                     text: $0.text)
+            },
+            followups: sections.followups,
+            roster: roster.labelsByKey)
     }
 
     // MARK: - JSON decoding (grammar makes malformed output rare, not impossible)
@@ -308,6 +316,7 @@ final class MeetingNotesGenerator: ObservableObject {
     /// progress fires on main after every completed model call.
     /// total = maps + 1 (summary) + (1 polish when it will run) + 1 (title).
     func generate(segments: [MeetingSegment],
+                  roster: MeetingRoster,
                   cleanup: CleanupService,
                   dictationActive: @escaping () -> Bool,
                   progress: @escaping (_ completed: Int, _ total: Int) -> Void) async -> Result? {
@@ -316,8 +325,15 @@ final class MeetingNotesGenerator: ObservableObject {
             return nil
         }
 
+        // Built once per run: byte-identical across every map call, so the
+        // KV cache still pays (see the prompt-cache note above).
+        let mapPrompt = Self.mapSystemPrompt(roster: roster)
+        let polishPrompt = Self.polishSystemPrompt(roster: roster)
+        let mapSchema = Self.notesSchema(includeSummary: true, ownerLabels: roster.ownerLabels)
+        let polishSchema = Self.notesSchema(includeSummary: false, ownerLabels: roster.ownerLabels)
+
         let chunks = await Task.detached(priority: .userInitiated) {
-            Self.chunk(segments)
+            Self.chunk(segments, roster: roster)
         }.value
         guard !chunks.isEmpty else {
             Log.error("MeetingNotesGenerator: empty transcript — nothing to write notes about")
@@ -345,8 +361,8 @@ final class MeetingNotesGenerator: ObservableObject {
                 // capped reply is truncated JSON that fails decode — at
                 // temperature 0 the retry then truncates identically, so an
                 // undersized cap fails the whole run deterministically.
-                await cleanup.structured(system: Self.mapSystemPrompt, user: chunkText,
-                                         maxTokens: 1200, schema: Self.mapSchema)
+                await cleanup.structured(system: mapPrompt, user: chunkText,
+                                         maxTokens: 1200, schema: mapSchema)
             }) else { return nil }
             outputs.append(output)
             completed += 1
@@ -393,8 +409,8 @@ final class MeetingNotesGenerator: ObservableObject {
                                          decode: Self.decodeSections, call: {
                 // Output can approach input size (~950 tokens for a full
                 // 3,800-char draft), so the cap sits well above it.
-                await cleanup.structured(system: Self.polishSystemPrompt, user: polishInput,
-                                         maxTokens: 1200, schema: Self.polishSchema)
+                await cleanup.structured(system: polishPrompt, user: polishInput,
+                                         maxTokens: 1200, schema: polishSchema)
             })
             completed += 1
             if let polished, Self.hasContent(polished) || !Self.hasContent(merged) {
@@ -412,8 +428,12 @@ final class MeetingNotesGenerator: ObservableObject {
                      "exceed the polish budget — shipping deterministic merge")
         }
 
-        let markdown = await Task.detached(priority: .userInitiated) {
-            Self.render(summary: summary, sections: sections)
+        let finalSummary = summary
+        let finalSections = sections
+        let (document, markdown) = await Task.detached(priority: .userInitiated) {
+            let doc = Self.document(summary: finalSummary, sections: finalSections,
+                                    roster: roster)
+            return (doc, doc.render())
         }.value
 
         // TITLE: ported generateTitle.ts — input truncated to 2,000 chars,
@@ -442,7 +462,7 @@ final class MeetingNotesGenerator: ObservableObject {
 
         Log.info("MeetingNotesGenerator: notes done — \(markdown.count) chars, " +
                  "\(completed)/\(total) calls")
-        return Result(markdown: markdown, title: title)
+        return Result(markdown: markdown, title: title, document: document)
     }
 
     // MARK: - Call plumbing

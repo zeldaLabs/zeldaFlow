@@ -370,6 +370,32 @@ final class MeetingStore: ObservableObject {
         }
     }
 
+    /// The structured notes document (ADR 38) — notes.json beside notes.md.
+    /// notes.md is a render of this; a speaker rename re-renders from here
+    /// instead of re-running the model. Absent for pre-ADR-38 meetings,
+    /// which by construction contain no names to rewrite.
+    private func notesDocumentURL(_ id: UUID) -> URL {
+        folderURL(id).appendingPathComponent("notes.json")
+    }
+
+    func writeNotesDocument(_ id: UUID, _ document: NotesDocument) {
+        queue.async {
+            guard let data = try? self.encoder.encode(document) else { return }
+            do {
+                try data.write(to: self.notesDocumentURL(id), options: .atomic)
+            } catch {
+                Log.error("MeetingStore: notes.json write failed for \(id.uuidString): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func loadNotesDocument(_ id: UUID) -> NotesDocument? {
+        queue.sync {
+            guard let data = try? Data(contentsOf: notesDocumentURL(id)) else { return nil }
+            return try? decoder.decode(NotesDocument.self, from: data)
+        }
+    }
+
     // MARK: - Crash recovery + retention
 
     /// Meetings whose last index state still looks mid-recording: noteState

@@ -105,6 +105,7 @@ struct PillView: View {
         case .success: return "success"
         case .notice: return "notice"
         case .answer: return "answer"
+        case .learnPrompt: return "learnPrompt"
         case .chat: return "chat"
         }
     }
@@ -246,6 +247,24 @@ struct PillView: View {
                 .frame(maxWidth: 470)
                 .contentShape(Rectangle())
                 .onTapGesture { state.expandChat() }
+        case .learnPrompt(let from, let to):
+            // The user retyped a dictated word; one click teaches it
+            // (ADR 0037). Click-optional — fades into the Hub if ignored.
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Zelda.primary)
+                Text("Learn \"\(to)\"?")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.95))
+                Text("heard \"\(from)\" · click to add")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
+            .lineLimit(1)
+            .frame(maxWidth: 470)
+            .contentShape(Rectangle())
+            .onTapGesture { state.approveCorrection() }
         case .idle, .typing, .chat:
             EmptyView()   // all handled directly in body
         }

@@ -32,7 +32,8 @@ flowchart LR
     scr["attached displays"] -->|evalpill| pill["PillPanel geometry"]
     dev["connected audio devices"] -->|evalaudio| au["AudioRecorder<br/>VPIO lifecycle, mic steering"]
     ev["synthesised key events"] -->|evalhotkey| hk["HotkeyMonitor<br/>callback latency, gestures"]
-    sig["scripted signals ·<br/>synthetic segments · scratch dir"] -->|evalmeeting| meet["Meeting pipeline<br/>detection machine, holdback/matcher,<br/>chunker/renderer, store"]
+    sig["scripted signals ·<br/>synthetic segments · scratch dir"] -->|evalmeeting| meet["Meeting pipeline<br/>detection machine, holdback/matcher,<br/>chunker/renderer, roster/names, store"]
+    dict["synthetic corrections ·<br/>scratch store"] -->|evaldictionary| corr["CorrectionDetector<br/>diff guards, replacements, prompt cap"]
     mic["mic capture, hardware Fn,<br/>Spaces/full-screen UI"] -.->|manual| uat["release checklist<br/>docs/UAT.md"]
 ```
 
@@ -387,7 +388,7 @@ callback and the state machine, not the hardware Fn press.
 "$BIN" --evalmeeting   # pure pins + scripted machine on any Mac; live checks skip without their grants
 ```
 
-Three tiers in one run, covering ADRs 27/29/30/31/32/33/34:
+Three tiers in one run, covering ADRs 27/29/30/31/32/33/34/38:
 
 - **Pure pins — no permissions, no clock.** The deterministic core of the
   meeting pipeline, all of it written time-injected for exactly this:
@@ -402,7 +403,14 @@ Three tiers in one run, covering ADRs 27/29/30/31/32/33/34:
   `SpeakerDiarizer` alignment pins (ADR 31: overlap voting under timestamp
   drift, unattributable-stays-Them, mic-never-assigned, and the
   transcriptHash-stable-across-annotation invariant that keeps notes from
-  going stale).
+  going stale). The speaker-attributed notes layer (ADR 38) pins the
+  roster (precedence, de-collision, key round-trips), the labeled
+  transcript builder never moving the hash, the speaker-handoff chunk
+  break, the dynamic owner-enum grammar, the name-inference acceptance
+  gate (evidence-backed only, stoplist, no duplicate assignment), the
+  exact render fixture with bolded owners, rename re-render determinism
+  ("You" never free-text replaced), and notes.json / pre-ADR-38 meta
+  decode compatibility.
 - **Scripted detection machine.** `MeetingDetectionEngine` is driven
   through `handle()` with a scripted `now()` and shrunk thresholds, so
   the whole state machine runs in ~2 s of wall time: tier-1 and tier-2
@@ -432,7 +440,34 @@ Three tiers in one run, covering ADRs 27/29/30/31/32/33/34:
   Each reports `skip`, not failure, so the deterministic tiers still gate a
   release on any machine.
 
-## 14. What is not automated, and why
+## 14. Dictionary evals — `zeldaFlow --evaldictionary`
+
+```bash
+"$BIN" --evaldictionary   # pure pins — no LLM, no AX, no permissions; runs in CI
+```
+
+Pins the learn-from-corrections loop (ADR 0037), all deterministic:
+
+- **Correction detector.** The happy paths (a retype inside a larger field,
+  a respelled name, a case-only recapitalization, detection surviving text
+  typed after the paste) and every fail-closed guard: unchanged text, empty
+  or unrelated fields, sub-4-word inserts, region rewrites, and the privacy
+  bound — a span that grew past the inserted text is never diffed.
+- **Similarity gate.** Content edits rejected ("tomorrow" → "Friday",
+  "cat" → "hat"); respellings accepted ("kubcon" → "KubeCon",
+  "sindy" → "Cindy", "github" → "GitHub").
+- **Correction records.** Count bumping, permanent case-insensitive pair
+  dismissal, dismissal surviving reload, and a pre-0037
+  `learned-words.json` still decoding — against a scratch store.
+- **Glossary guardrails.** The distinctiveness bar (short/common words stay
+  replacement-only), the 40-word prompt cap, and the one interaction that
+  could silently eat speech: with a learned word in the prompt,
+  `HallucinationFilter.scrubFinal` must keep a legitimate sentence using it
+  while still scrubbing glossary recitations and looped echoes.
+- **Replacement engine.** Case-insensitive whole-word mapping pinned
+  ("Coupon" maps, "coupons" survives).
+
+## 15. What is not automated, and why
 
 | Area | Why it's manual |
 |------|-----------------|

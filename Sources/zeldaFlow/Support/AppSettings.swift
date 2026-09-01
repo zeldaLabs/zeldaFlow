@@ -49,6 +49,11 @@ final class AppSettings: ObservableObject {
     @Published var screenContext: Bool {
         didSet { d.set(screenContext, forKey: "screenContext") }
     }
+    /// Learn from corrections: after a paste, two bounded re-reads of the
+    /// focused field notice a retyped word and offer to learn it (ADR 0037).
+    @Published var learnFromCorrections: Bool {
+        didSet { d.set(learnFromCorrections, forKey: "learnFromCorrections") }
+    }
     /// What zeldaFlow calls the user — asked on first launch, per-person.
     @Published var userName: String {
         didSet { d.set(userName, forKey: "userName") }
@@ -175,6 +180,8 @@ final class AppSettings: ObservableObject {
             ? true : d.bool(forKey: "showIdlePill")
         screenContext = d.object(forKey: "screenContext") == nil
             ? true : d.bool(forKey: "screenContext")
+        learnFromCorrections = d.object(forKey: "learnFromCorrections") == nil
+            ? true : d.bool(forKey: "learnFromCorrections")
         userName = d.string(forKey: "userName") ?? ""
         maxRecordingSeconds = d.object(forKey: "maxRecordingSeconds") == nil
             ? 300 : d.integer(forKey: "maxRecordingSeconds")
@@ -239,19 +246,29 @@ final class AppSettings: ObservableObject {
     /// Whisper initial_prompt: steers punctuation style and biases the decoder
     /// toward dictionary words (carried into every decode window).
     var whisperPrompt: String {
-        var p = "This is a carefully punctuated dictated note."
-        if !dictionaryWords.isEmpty {
-            p += " Glossary: \(dictionaryWords.joined(separator: ", "))."
-        }
-        return p
+        Self.sttPrompt(base: "This is a carefully punctuated dictated note.",
+                       dictionary: dictionaryWords)
     }
 
     /// Same glossary bias for command mode — proper nouns (artist names,
     /// project jargon) transcribe far better when the decoder has seen them.
     var commandWhisperPrompt: String {
-        var p = "This is a spoken command to a computer assistant."
-        if !dictionaryWords.isEmpty {
-            p += " Glossary: \(dictionaryWords.joined(separator: ", "))."
+        Self.sttPrompt(base: "This is a spoken command to a computer assistant.",
+                       dictionary: dictionaryWords)
+    }
+
+    /// Every glossary word in the prompt widens HallucinationFilter's
+    /// prompt-echo kill radius (5-char-prefix matching), so a dictionary that
+    /// now grows from corrections (ADR 0037) is capped here: the most recent
+    /// 40 words ride the prompt. The FULL list still reaches the Gemma
+    /// cleanup pass and the replacement rules, which scrub nothing.
+    static let promptGlossaryCap = 40
+
+    static func sttPrompt(base: String, dictionary: [String]) -> String {
+        var p = base
+        let glossary = dictionary.suffix(promptGlossaryCap)
+        if !glossary.isEmpty {
+            p += " Glossary: \(glossary.joined(separator: ", "))."
         }
         return p
     }

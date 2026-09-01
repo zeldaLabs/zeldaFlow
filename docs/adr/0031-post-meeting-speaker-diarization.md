@@ -52,7 +52,9 @@ after itself; a nil result still cleans up and never blocks polish/notes).
 - **Hash stability is a hard invariant**, pinned by eval:
   `orderedTranscriptText()` still emits "You:/Them:" — the notes pipeline,
   the `owner` grammar, and `notesHash` staleness are untouched by ADR 31.
-  Speaker-aware *notes* are an explicit v2.
+  Speaker-aware *notes* are an explicit v2 — shipped as
+  [ADR 38](0038-speaker-attributed-notes-with-inferred-names.md), which
+  keeps this hash invariant intact via a separate LLM-facing builder.
 - **Renaming** ("Speaker 1" → a real name) lives in `meta.speakerNames`,
   per meeting, and flows into transcript UI and exports — never into the
   transcript file or its hash.

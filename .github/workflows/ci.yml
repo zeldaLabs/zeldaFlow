@@ -37,8 +37,8 @@ jobs:
       - name: Build
         run: scripts/build-app.sh release
 
-      # The four harnesses that need no microphone, no models, no display and
-      # no permissions. Each exits non-zero on failure. The rest of the twelve
+      # The five harnesses that need no microphone, no models, no display and
+      # no permissions. Each exits non-zero on failure. The rest of the thirteen
       # (--selftest, --evalpill, --evalaudio, --evalui, --evalactions,
       # --evalfiles) need hardware or grants — see docs/TESTING.md.
       - name: Command grammar, gates, anti-hallucination (40 pins)
@@ -49,6 +49,9 @@ jobs:
 
       - name: Task loop safety, termination, pruning
         run: ./build/zeldaFlow.app/Contents/MacOS/zeldaFlow --evaltask
+
+      - name: Correction detector, dictionary, replacement engine
+        run: ./build/zeldaFlow.app/Contents/MacOS/zeldaFlow --evaldictionary
 
       # Live tiers skip cleanly without models; the pure tiers still run.
       - name: Meeting detection, chunking, notes, diarizer

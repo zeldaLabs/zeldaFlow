@@ -41,6 +41,7 @@ enum MeetingEvals {
         holdbackSection(t)
         gatesSection(t)
         notesSection(t)
+        speakerNotesSection(t)
         polisherSection(t)
         chunkingSection(t)
         diarizationSection(t)
@@ -379,21 +380,32 @@ enum MeetingEvals {
                             source: (i / 6) % 2 == 0 ? .you : .them,
                             start: Double(i) * 10, end: Double(i) * 10 + 5))
         }
-        let chunks = MeetingNotesGenerator.chunk(hour)
+        // Undiarized default roster: labels are exactly You/Them, so the
+        // speaker-labeled builder must equal the legacy hash text — the
+        // ADR 38 compatibility pin.
+        let hourRoster = MeetingRoster(segments: hour)
+        t.check("default roster's labeled transcript equals orderedTranscriptText",
+                hour.speakerTranscriptText(roster: hourRoster) == hour.orderedTranscriptText())
+
+        let chunks = MeetingNotesGenerator.chunk(hour, roster: hourRoster)
         let maxLen = chunks.map(\.count).max() ?? 0
         t.check("1 h transcript chunks into 12-16 pieces", (12...16).contains(chunks.count),
                 "\(chunks.count) chunks")
         t.check("no chunk exceeds the 3,800-char context budget",
                 maxLen <= MeetingNotesGenerator.chunkCharBudget, "largest \(maxLen) chars")
-        // Rejoining the chunks must reproduce the ordered transcript exactly:
+        // Rejoining the chunks must reproduce the labeled transcript exactly:
         // proves no segment was split mid-text and none was dropped.
-        t.check("chunks reassemble to the ordered transcript byte-for-byte",
-                chunks.joined(separator: "\n") == hour.orderedTranscriptText())
+        t.check("chunks reassemble to the labeled transcript byte-for-byte",
+                chunks.joined(separator: "\n")
+                == hour.speakerTranscriptText(roster: hourRoster))
 
-        // Renderer fixture: the exact OpenWhispr note shape, enforced by
-        // construction — summary paragraph, ## sections in fixed order,
-        // "- [ ]" checkboxes, "Unclear" unprefixed (it would read as a name).
-        let full = MeetingNotesGenerator.render(
+        // Renderer fixture: the exact note shape, enforced by construction —
+        // summary paragraph, ## sections in fixed order, "- [ ]" checkboxes
+        // with bolded owners (ADR 38), "unclear" unprefixed (it would read
+        // as a name). Owners are labels going in, roster keys in the stored
+        // document.
+        let fixtureRoster = MeetingRoster(segments: [seg("hey", source: .them)])
+        let doc = MeetingNotesGenerator.document(
             summary: "Two teams agreed a launch plan.",
             sections: MeetingNotesGenerator.Sections(
                 discussion: ["point one", "point two"],
@@ -401,7 +413,10 @@ enum MeetingEvals {
                 actions: [.init(owner: "You", text: "ship the beta"),
                           .init(owner: "Them", text: "send the contract"),
                           .init(owner: "Unclear", text: "review the metrics dashboard")],
-                followups: ["revisit pricing next week"]))
+                followups: ["revisit pricing next week"]),
+            roster: fixtureRoster)
+        t.check("document stores owners as stable roster keys",
+                doc.actions.map(\.owner) == ["you", "s-1", "unclear"])
         let expected = """
         Two teams agreed a launch plan.
 
@@ -413,26 +428,28 @@ enum MeetingEvals {
         - decision one
 
         ## Action Items
-        - [ ] You: ship the beta
-        - [ ] Them: send the contract
+        - [ ] **You**: ship the beta
+        - [ ] **Them**: send the contract
         - [ ] review the metrics dashboard
 
         ## Follow-ups
         - revisit pricing next week
         """
-        t.check("renderer emits the exact markdown shape", full == expected)
+        t.check("renderer emits the exact markdown shape", doc.render() == expected)
 
-        let sparse = MeetingNotesGenerator.render(
+        let sparse = MeetingNotesGenerator.document(
             summary: "",
             sections: MeetingNotesGenerator.Sections(
                 discussion: [], decisions: [],
-                actions: [.init(owner: "You", text: "send the recap")], followups: []))
+                actions: [.init(owner: "You", text: "send the recap")], followups: []),
+            roster: fixtureRoster)
         t.check("empty summary and empty sections are omitted entirely",
-                sparse == "## Action Items\n- [ ] You: send the recap")
+                sparse.render() == "## Action Items\n- [ ] **You**: send the recap")
         t.check("all-empty sections render to nothing",
-                MeetingNotesGenerator.render(summary: "",
+                MeetingNotesGenerator.document(summary: "",
                     sections: MeetingNotesGenerator.Sections(
-                        discussion: [], decisions: [], actions: [], followups: [])).isEmpty)
+                        discussion: [], decisions: [], actions: [], followups: []),
+                    roster: fixtureRoster).render().isEmpty)
 
         // Merge: cross-chunk repetition collapses with the echo matcher, and
         // a duplicate that KNOWS the owner upgrades an Unclear one — the
@@ -459,6 +476,158 @@ enum MeetingEvals {
         edited[100] = seg(edited[100].text + " x", source: edited[100].source,
                           start: edited[100].start, end: edited[100].end)
         t.check("one text change changes the hash", edited.transcriptHash() != h1)
+    }
+
+    // MARK: - 4b. Speaker-attributed notes (ADR 38, no LLM)
+
+    private static func speakerNotesSection(_ t: Tally) {
+        print("\n  Speaker-attributed notes — roster, name gate, rename re-render (ADR 38):")
+        let epoch = Date(timeIntervalSince1970: 1_754_000_000)
+        func them(_ text: String, _ start: TimeInterval, speaker: Int?) -> MeetingSegment {
+            MeetingSegment(id: UUID(), source: .them, text: text, start: start,
+                           end: start + 4, capturedAt: epoch, committedAt: epoch,
+                           risky: false, speaker: speaker)
+        }
+        let segments = [
+            seg("Hi both, thanks for joining.", source: .you, start: 0, end: 4),
+            them("Hey! This is Priya from platform.", 5, speaker: 0),
+            them("And I'm on the infra side.", 10, speaker: 1),
+            seg("Great — let's start with pricing.", source: .you, start: 15, end: 19),
+            them("Thanks, Priya. I'll take the budget question.", 20, speaker: 1),
+        ]
+
+        // Roster: you-first, far side in first-speech order, precedence
+        // user rename > inferred > default, duplicates de-collide.
+        let plain = MeetingRoster(segments: segments)
+        t.check("roster orders you-first then first-speech",
+                plain.entries.map(\.key) == ["you", "s0", "s1"]
+                && plain.ownerLabels == ["You", "Speaker 1", "Speaker 2"])
+        let named = MeetingRoster(segments: segments,
+                                  userNames: [1: "Marcus"], inferred: ["s0": "Priya", "s1": "Pete"])
+        t.check("user rename beats inferred beats default",
+                named.ownerLabels == ["You", "Priya", "Marcus"])
+        let collided = MeetingRoster(segments: segments,
+                                     userNames: [1: "Priya"], inferred: ["s0": "Priya"])
+        t.check("duplicate label de-collides to the default (grammar stays bijective)",
+                collided.ownerLabels == ["You", "Speaker 1", "Priya"]
+                || collided.ownerLabels == ["You", "Priya", "Speaker 2"])
+        t.check("key(forLabel:) round-trips every roster label",
+                named.ownerLabels.allSatisfy { named.key(forLabel: $0) != nil }
+                && named.key(forLabel: "Priya") == "s0")
+
+        // Labeled builder + hash invariant: labels change, the hash text
+        // does not (the ADR 31 pin extended through ADR 38).
+        let labeled = segments.speakerTranscriptText(roster: named)
+        t.check("labeled transcript carries the roster labels",
+                labeled.contains("Priya: Hey! This is Priya from platform.")
+                && labeled.contains("Marcus: And I'm on the infra side.")
+                && labeled.hasPrefix("You: "))
+        let hashBefore = segments.transcriptHash()
+        _ = segments.speakerTranscriptText(roster: named)
+        t.check("the labeled builder never moves transcriptHash (ADR 31 pin)",
+                segments.transcriptHash() == hashBefore
+                && !segments.orderedTranscriptText().contains("\nPriya:")
+                && !segments.orderedTranscriptText().contains("\nMarcus:"))
+
+        // Chunker breaks on a far-side speaker handoff, not just You↔Them.
+        let filler = String(repeating: "word ", count: 120)   // ~600 chars/segment
+        var handoff: [MeetingSegment] = []
+        for i in 0..<5 { handoff.append(them("s1 \(i) " + filler, Double(i * 10), speaker: 0)) }
+        handoff.append(them("now speaker two begins", 60, speaker: 1))
+        let handoffChunks = MeetingNotesGenerator.chunk(
+            handoff, roster: MeetingRoster(segments: handoff))
+        t.check("speaker 1 → speaker 2 handoff past the threshold breaks the chunk",
+                handoffChunks.count == 2
+                && handoffChunks.last == "Speaker 2: now speaker two begins",
+                "\(handoffChunks.count) chunks")
+
+        // Dynamic owner grammar: the enum is exactly roster labels + Unclear.
+        let schema = MeetingNotesGenerator.notesSchema(includeSummary: true,
+                                                       ownerLabels: named.ownerLabels)
+        let schemaJSON = (try? JSONEncoder().encode(schema))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        t.check("owner enum is the roster plus Unclear",
+                schemaJSON.contains("Priya") && schemaJSON.contains("Marcus")
+                && schemaJSON.contains("Unclear") && !schemaJSON.contains("Them"))
+        t.check("map prompt names the roster and only the roster",
+                MeetingNotesGenerator.mapSystemPrompt(roster: named)
+                    .contains("\"You\", \"Priya\", \"Marcus\""))
+
+        // Name-inference acceptance gate: only evidence-backed, transcript-
+        // present, name-shaped proposals survive; collisions resolve once.
+        typealias P = SpeakerNameInferrer.Proposal
+        let transcript = segments.speakerTranscriptText(roster: plain)
+        func gate(_ proposals: [P]) -> [String: String] {
+            SpeakerNameInferrer.accept(proposals: proposals, transcript: transcript,
+                                       roster: plain)
+        }
+        t.check("self-introduction is accepted",
+                gate([P(label: "Speaker 1", name: "Priya",
+                        evidence: "This is Priya from platform")]) == ["s0": "Priya"])
+        t.check("name absent from the transcript is rejected",
+                gate([P(label: "Speaker 1", name: "Bianca",
+                        evidence: "This is Priya from platform")]).isEmpty)
+        t.check("fabricated evidence is rejected",
+                gate([P(label: "Speaker 1", name: "Priya",
+                        evidence: "Priya introduced herself at length here")]).isEmpty)
+        t.check("stoplist word is rejected even when present",
+                gate([P(label: "Speaker 1", name: "Thanks",
+                        evidence: "Thanks, Priya. I'll take the budget question.")]).isEmpty)
+        t.check("one name never lands on two speakers (first evidence wins)",
+                gate([P(label: "Speaker 1", name: "Priya",
+                        evidence: "This is Priya from platform"),
+                      P(label: "Speaker 2", name: "Priya",
+                        evidence: "Thanks, Priya. I'll take the budget question.")])
+                == ["s0": "Priya"])
+        t.check("labels that aren't on the far side are rejected",
+                gate([P(label: "You", name: "Priya",
+                        evidence: "This is Priya from platform")]).isEmpty)
+
+        // Evidence excerpt: the head plus vocative lines with their
+        // predecessor (a vocative addresses the previous speaker).
+        let longHead = (0..<80).map { "You: filler line number \($0) about the roadmap" }
+            .joined(separator: "\n")
+        let tailEvidence = "You: over the handoff\nSpeaker 2: Thanks, Priya. Noted."
+        let excerpt = SpeakerNameInferrer.evidenceExcerpt(
+            transcript: longHead + "\n" + tailEvidence)
+        t.check("evidence excerpt keeps the vocative line and its predecessor",
+                excerpt.contains("Thanks, Priya. Noted.")
+                && excerpt.contains("over the handoff"))
+
+        // Rename propagation: re-render from the stored document resolves
+        // owner keys AND free-text mentions — and never touches "You".
+        let document = NotesDocument(
+            summary: "Speaker 2 walked You through the budget.",
+            discussion: ["**Budget** — Speaker 2 proposed a freeze"],
+            decisions: ["Speaker 2 approved the budget"],
+            actions: [.init(owner: "s1", text: "circulate the budget sheet"),
+                      .init(owner: "you", text: "ship the beta"),
+                      .init(owner: "unclear", text: "review the metrics")],
+            followups: [],
+            roster: ["you": "You", "s0": "Speaker 1", "s1": "Speaker 2"])
+        let renamed = document.render(labels: ["you": "You", "s0": "Speaker 1",
+                                               "s1": "Marcus"])
+        t.check("rename lands in owner prefixes and free text",
+                renamed.contains("- [ ] **Marcus**: circulate the budget sheet")
+                && renamed.contains("- Marcus approved the budget")
+                && renamed.contains("**Budget** — Marcus proposed a freeze"))
+        t.check("\"You\" is never free-text replaced",
+                renamed.contains("walked You through the budget")
+                && renamed.contains("- [ ] **You**: ship the beta"))
+        t.check("re-render is deterministic from the pristine document",
+                document.render(labels: ["you": "You", "s0": "Speaker 1",
+                                         "s1": "Marcus"]) == renamed
+                && document.render() != renamed)
+
+        // Storage compatibility: the document round-trips, and a pre-ADR-38
+        // meta.json (no inferredSpeakerNames) still decodes.
+        let roundTripped = (try? JSONEncoder().encode(document))
+            .flatMap { try? JSONDecoder().decode(NotesDocument.self, from: $0) }
+        t.check("NotesDocument survives a JSON round-trip", roundTripped == document)
+        let legacyMeta = #"{"schemaVersion":1,"startedAt":700000000,"trigger":"manual","appName":"Zoom"}"#
+        let decodedMeta = try? JSONDecoder().decode(MeetingMeta.self, from: Data(legacyMeta.utf8))
+        t.check("pre-ADR-38 meta.json decodes (inferredSpeakerNames optional)",
+                decodedMeta != nil && decodedMeta?.inferredSpeakerNames == nil)
     }
 
     // MARK: - 5. MeetingStore (scratch dir)

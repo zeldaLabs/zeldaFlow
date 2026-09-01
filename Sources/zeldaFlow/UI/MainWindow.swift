@@ -548,6 +548,30 @@ private struct DictionaryPage: View {
         VStack(alignment: .leading, spacing: 0) {
             PageHeader(title: "Dictionary")
             Form {
+                if !learned.correctionSuggestions.isEmpty {
+                    Section("From your corrections — words you retyped after dictating") {
+                        ForEach(learned.correctionSuggestions) { rec in
+                            HStack {
+                                Image(systemName: "arrow.uturn.backward.circle")
+                                    .foregroundStyle(Zelda.primary)
+                                Text("\(rec.from) → \(rec.to)")
+                                Spacer()
+                                Button("Add") {
+                                    learned.approveCorrection(from: rec.from, to: rec.to)
+                                }
+                                .buttonStyle(.bordered)
+                                Button {
+                                    learned.dismissCorrection(from: rec.from, to: rec.to)
+                                } label: {
+                                    Image(systemName: "xmark")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Don't suggest this correction again")
+                            }
+                        }
+                    }
+                }
+
                 if !learned.suggestions.isEmpty {
                     Section("Suggested by zeldaFlow — words you keep using") {
                         ForEach(learned.suggestions, id: \.self) { word in
@@ -766,6 +790,7 @@ private struct SettingsPage: View {
                     Toggle("Sound when recording starts", isOn: $settings.soundFeedback)
                     Toggle("Always show mini pill at screen bottom", isOn: $settings.showIdlePill)
                     Toggle("Screen-aware accuracy (reads on-screen names locally)", isOn: $settings.screenContext)
+                    Toggle("Learn from corrections (offer retyped words for the dictionary)", isOn: $settings.learnFromCorrections)
                     Stepper("Max recording: \(settings.maxRecordingSeconds / 60) min",
                             value: $settings.maxRecordingSeconds, in: 60...1200, step: 60)
                 }

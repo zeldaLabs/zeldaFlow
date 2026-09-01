@@ -22,6 +22,7 @@ final class AppState: ObservableObject, HotkeyMonitorDelegate {
         case confirming(String)   // awaiting Fn-to-confirm on a consequential action
         case notice(String)       // transient message in the pill
         case answer(String)       // an answer worth a follow-up — click expands to chat
+        case learnPrompt(from: String, to: String)  // "Learn 'X'?" after a retype (ADR 0037)
         case chat                 // the pill expanded into the chat note
         case success
     }
@@ -62,6 +63,7 @@ final class AppState: ObservableObject, HotkeyMonitorDelegate {
     let recorder = AudioRecorder()
     let hotkeyMonitor = HotkeyMonitor()
     lazy var cleanup = CleanupService(port: settings.llamaPort)
+    private let correctionWatcher = CorrectionWatcher()
 
     private var activityToken: NSObjectProtocol?
     private var maxDurationWork: DispatchWorkItem?
@@ -130,6 +132,9 @@ final class AppState: ObservableObject, HotkeyMonitorDelegate {
             self?.micConfigurationChanged()
         }
         hotkeyMonitor.delegate = self
+        correctionWatcher.onCandidate = { [weak self] candidate in
+            self?.correctionDetected(candidate)
+        }
         // The tap thread can't read `@Published` settings, so a rebind is
         // pushed to it instead of polled per event.
         settings.$hotkey
@@ -255,6 +260,7 @@ final class AppState: ObservableObject, HotkeyMonitorDelegate {
         // touch the phase (generation guard).
         phaseResetWork?.cancel()
         sessionGeneration += 1
+        correctionWatcher.disarm()   // a new session's paste supersedes the old watch
         let generation = sessionGeneration
         let front = NSWorkspace.shared.frontmostApplication
         targetAppName = front?.localizedName ?? ""
@@ -667,6 +673,8 @@ final class AppState: ObservableObject, HotkeyMonitorDelegate {
 
             switch result {
             case .pasted:
+                self.correctionWatcher.arm(inserted: final, bundleID: appBundleID,
+                                           generation: generation)
                 if self.sessionGeneration == generation {
                     self.phase = .success
                     self.scheduleReset(after: 0.9)
@@ -1044,16 +1052,30 @@ final class AppState: ObservableObject, HotkeyMonitorDelegate {
     }
 
     private func applyReplacements(_ text: String) -> String {
-        var out = text
-        for (from, to) in settings.replacements where !from.isEmpty {
-            let pattern = "(?i)\\b" + NSRegularExpression.escapedPattern(for: from) + "\\b"
-            if let re = try? NSRegularExpression(pattern: pattern) {
-                out = re.stringByReplacingMatches(
-                    in: out, range: NSRange(out.startIndex..., in: out),
-                    withTemplate: NSRegularExpression.escapedTemplate(for: to))
-            }
-        }
-        return out
+        Replacements.apply(settings.replacements, to: text)
+    }
+
+    // MARK: - Learn from corrections (ADR 0037)
+
+    /// A probe caught a retype of a word we just inserted. Always recorded in
+    /// the Hub; the pill asks only when it is idle — never over a recording,
+    /// a chat note, or an armed confirmation gate.
+    private func correctionDetected(_ candidate: CorrectionDetector.Candidate) {
+        LearnedWords.shared.recordCorrection(from: candidate.from, to: candidate.to)
+        guard case .idle = phase else { return }
+        Log.info("correction detected: \"\(candidate.from)\" → \"\(candidate.to)\"")
+        phase = .learnPrompt(from: candidate.from, to: candidate.to)
+        scheduleReset(after: 8)   // ignored prompt falls back to the Hub list
+    }
+
+    /// Pill tap on the learn prompt: one click adds the replacement rule and
+    /// (when distinctive enough) the glossary word.
+    func approveCorrection() {
+        guard case .learnPrompt(let from, let to) = phase else { return }
+        LearnedWords.shared.approveCorrection(from: from, to: to)
+        playSound("Glass")
+        phase = .success
+        scheduleReset(after: 0.9)
     }
 
     private func scheduleMaxDurationStop() {
